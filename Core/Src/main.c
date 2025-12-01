@@ -98,6 +98,8 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
   //main_avionic_init();
+
+  //GPS init sistemi
   uint8_t ch;
   /* USER CODE END 2 */
 
@@ -108,6 +110,8 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 	  //main_avionic_loop();
+
+	  //GPS Loop
       if (HAL_UART_Receive(&huart2, &ch, 1, 10) == HAL_OK)
       {
           HAL_UART_Transmit(&huart1, &ch, 1, 10);
