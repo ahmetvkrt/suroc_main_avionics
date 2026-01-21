@@ -2,26 +2,25 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2025 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * @brief          : Main program body - BNO085 IMU Sensor
   ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "i2c.h"
+#include "tim.h"
+#include "usart.h"
+#include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "app.h"
+#include <stdio.h>
+#include <string.h>
+#include "sh2.h"
+#include "sh2_SensorValue.h"
+#include "sh2_err.h"
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -40,28 +39,86 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
-I2C_HandleTypeDef hi2c1;
-
-UART_HandleTypeDef huart1;
-UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+// Global değişkenler - sensör verilerini callback'te alacağız
+volatile sh2_SensorEvent_t latestSensorEvent;
+volatile uint8_t newDataReady = 0;
+// Sensör değerleri - istediğiniz yerde kullanabilirsiniz
+float accel_x, accel_y, accel_z;
+float gyro_x, gyro_y, gyro_z;
+float mag_x, mag_y, mag_z;
+float quat_w, quat_x, quat_y, quat_z;
+float roll, pitch, yaw;
 
+uint32_t lastPrintTime = 0; // Son yazdırma zamanı
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
-static void MX_GPIO_Init(void);
-static void MX_I2C1_Init(void);
-static void MX_USART1_UART_Init(void);
-static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+// ========== HAL FONKSIYONLARI ==========
 
+int sh2_hal_open(sh2_Hal_t *self) {
+    // I2C zaten CubeMX tarafından başlatıldı
+    return SH2_OK;
+}
+
+void sh2_hal_close(sh2_Hal_t *self) {
+    // Kapatma işlemi
+}
+
+int sh2_hal_read(sh2_Hal_t *self, uint8_t *pBuffer, unsigned len, uint32_t *t_us) {
+    HAL_StatusTypeDef status;
+    status = HAL_I2C_Master_Receive(&hi2c1, 0x4A << 1, pBuffer, len, 100);
+
+    if (t_us) {
+        *t_us = HAL_GetTick() * 1000; // Zaman damgası (mikrosaniye)
+    }
+
+    return (status == HAL_OK) ? len : 0;
+}
+
+int sh2_hal_write(sh2_Hal_t *self, uint8_t *pBuffer, unsigned len) {
+    HAL_StatusTypeDef status;
+    status = HAL_I2C_Master_Transmit(&hi2c1, 0x4A << 1, pBuffer, len, 100);
+    return (status == HAL_OK) ? len : 0;
+}
+
+uint32_t sh2_hal_getTimeUs(sh2_Hal_t *self) {
+    return HAL_GetTick() * 1000; // ms'yi mikrosaniyeye çevir
+}
+
+// HAL yapısı
+sh2_Hal_t hal = {
+    .open = sh2_hal_open,
+    .close = sh2_hal_close,
+    .read = sh2_hal_read,
+    .write = sh2_hal_write,
+    .getTimeUs = sh2_hal_getTimeUs
+};
+
+// ========== CALLBACK FONKSIYONLARI ==========
+
+// Sensör verisi geldiğinde otomatik çağrılır
+void sensor_callback(void *cookie, sh2_SensorEvent_t *pEvent) {
+    // Yeni veri geldi, kopyala
+    latestSensorEvent = *pEvent;
+    newDataReady = 1;
+}
+
+// Event callback (reset, hata vs için)
+void event_callback(void *cookie, sh2_AsyncEvent_t *pEvent) {
+    if (pEvent->eventId == SH2_RESET) {
+        // Sensör reset oldu
+        // Gerekirse yeniden başlatma yapılabilir
+    }
+}
 /* USER CODE END 0 */
 
 /**
@@ -88,34 +145,205 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_I2C1_Init();
   MX_USART1_UART_Init();
-  MX_USART2_UART_Init();
+  MX_TIM1_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
-  //main_avionic_init();
+  HAL_TIM_Base_Start(&htim1); // timer'ı başlattım
+  // I2C Tarama
+  /*
+    printf("I2C Scanning...\r\n");
+    for(uint8_t addr = 0x01; addr < 0x7F; addr++) {
+      if(HAL_I2C_IsDeviceReady(&hi2c1, addr << 1, 1, 100) == HAL_OK) {
+        printf("Found device at: 0x%02X\r\n", addr);
+      }
+    }
 
-  //GPS init sistemi
-  uint8_t ch;
+    for(uint8_t addr = 0x60; addr < 0x7F; addr++)
+    {
+        if(HAL_I2C_IsDeviceReady(&hi2c1, addr << 1, 2, 100) == HAL_OK)
+            printf("Found: 0x%02X\r\n", addr);
+    }
+    */
+
+    //printf("Scan complete.\r\n");
+
+  // UART'a başlangıç mesajı gönder
+  printf("BNO085 Başlatılıyor...\r\n");
+/*
+  // BNO085 I2C adresi (7-bit)
+  #define BNO085_ADDRESS 0x4A << 1  // HAL için 8-bit adres
+
+  // I2C bağlantı testi
+  uint8_t testData;
+  HAL_StatusTypeDef status;
+
+  status = HAL_I2C_IsDeviceReady(&hi2c1, BNO085_ADDRESS, 3, 100);
+  if(status == HAL_OK) {
+      printf("Başlatıldı!\r\n");
+  }
+*/
+  //...
+  // ========== BNO085 BAŞLATMA ==========
+
+    int status = sh2_open(&hal, event_callback, NULL);
+
+    if (status != SH2_OK) {
+        // Hata! sh2_open başarısız
+        while(1) {
+            HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5); // LED yanıp sönsün
+            HAL_Delay(200);
+        }
+    }
+
+    HAL_Delay(100); // Sensörün başlaması için bekle
+
+    // Sensor callback'i kaydet - BU ÇOK ÖNEMLİ!
+    sh2_setSensorCallback(sensor_callback, NULL);
+
+    // Sensör bilgilerini kontrol et
+    sh2_ProductIds_t prodIds;
+    status = sh2_getProdIds(&prodIds);
+
+    if (status != SH2_OK) {
+        // Sensörle iletişim kurulamadı
+        while(1) {
+            HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+            HAL_Delay(100);
+        }
+    }
+
+    // ========== SENSÖRLERI AKTİF ET ==========
+
+    sh2_SensorConfig_t config;
+    config.changeSensitivityEnabled = false;
+    config.wakeupEnabled = false;
+    config.changeSensitivityRelative = false;
+    config.alwaysOnEnabled = false;
+    config.changeSensitivity = 0;
+    config.reportInterval_us = 10000;  // 10ms = 100Hz
+    config.batchInterval_us = 0;
+    config.sensorSpecific = 0;
+
+    // İstediğiniz tüm sensörleri aktif edin
+    sh2_setSensorConfig(SH2_ROTATION_VECTOR, &config);           // Quaternion
+    sh2_setSensorConfig(SH2_ACCELEROMETER, &config);             // Accelerometer
+    sh2_setSensorConfig(SH2_GYROSCOPE_CALIBRATED, &config);      // Gyroscope
+    sh2_setSensorConfig(SH2_MAGNETIC_FIELD_CALIBRATED, &config); // Magnetometer
+    sh2_setSensorConfig(SH2_LINEAR_ACCELERATION, &config);       // Linear Accel
+    sh2_setSensorConfig(SH2_GRAVITY, &config);                   // Gravity
+
+    HAL_Delay(100); // Sensörlerin aktif olması için bekle
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while(1){
+    printf("Verileri okumaya geçiliyor...");
+  while (1)
+  {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  //main_avionic_loop();
+	  // sh2 servisini çalıştır - callback'leri tetikler
+	      sh2_service();
 
-	  //GPS Loop
-      if (HAL_UART_Receive(&huart2, &ch, 1, 10) == HAL_OK)
-      {
-          HAL_UART_Transmit(&huart1, &ch, 1, 10);
-      }
+	      // Yeni veri geldi mi kontrol et
+	      if (newDataReady) {
+	          newDataReady = 0; // Bayrağı temizle
+
+	          sh2_SensorValue_t sensorValue;
+
+	          // Ham event'i decode et
+	          int rc = sh2_decodeSensorEvent(&sensorValue, &latestSensorEvent);
+
+	          if (rc == SH2_OK) {
+
+	              // Hangi sensör verisi geldi?
+	              switch (sensorValue.sensorId) {
+
+	                  case SH2_ACCELEROMETER:
+	                      accel_x = sensorValue.un.accelerometer.x;
+	                      accel_y = sensorValue.un.accelerometer.y;
+	                      accel_z = sensorValue.un.accelerometer.z;
+
+	                      // Burada kullanabilirsiniz (örn: UART ile gönderin)
+	                      // printf("Accel: %.2f, %.2f, %.2f\n", accel_x, accel_y, accel_z);
+	                      break;
+
+	                  case SH2_GYROSCOPE_CALIBRATED:
+	                      gyro_x = sensorValue.un.gyroscope.x; // rad/s
+	                      gyro_y = sensorValue.un.gyroscope.y;
+	                      gyro_z = sensorValue.un.gyroscope.z;
+	                      break;
+
+	                  case SH2_MAGNETIC_FIELD_CALIBRATED:
+	                      mag_x = sensorValue.un.magneticField.x; // uTesla
+	                      mag_y = sensorValue.un.magneticField.y;
+	                      mag_z = sensorValue.un.magneticField.z;
+	                      break;
+
+	                  case SH2_ROTATION_VECTOR:
+	                      quat_w = sensorValue.un.rotationVector.real;
+	                      quat_x = sensorValue.un.rotationVector.i;
+	                      quat_y = sensorValue.un.rotationVector.j;
+	                      quat_z = sensorValue.un.rotationVector.k;
+
+	                      // Quaternion'dan Euler açılarına çevirme
+	                      roll = atan2f(2.0f*(quat_w*quat_x + quat_y*quat_z),
+	                                    1.0f - 2.0f*(quat_x*quat_x + quat_y*quat_y));
+
+	                      pitch = asinf(2.0f*(quat_w*quat_y - quat_z*quat_x));
+
+	                      yaw = atan2f(2.0f*(quat_w*quat_z + quat_x*quat_y),
+	                                   1.0f - 2.0f*(quat_y*quat_y + quat_z*quat_z));
+
+	                      // Radyandan dereceye çevir
+	                      roll = roll * 180.0f / M_PI;
+	                      pitch = pitch * 180.0f / M_PI;
+	                      yaw = yaw * 180.0f / M_PI;
+
+	                      // Kullanım örneği
+	                      // printf("Roll: %.1f, Pitch: %.1f, Yaw: %.1f\n", roll, pitch, yaw);
+	                      break;
+
+	                  case SH2_LINEAR_ACCELERATION:
+	                      float lin_x = sensorValue.un.linearAcceleration.x;
+	                      float lin_y = sensorValue.un.linearAcceleration.y;
+	                      float lin_z = sensorValue.un.linearAcceleration.z;
+	                      // Yerçekimi filtreli ivme
+	                      break;
+
+	                  case SH2_GRAVITY:
+	                      float grav_x = sensorValue.un.gravity.x;
+	                      float grav_y = sensorValue.un.gravity.y;
+	                      float grav_z = sensorValue.un.gravity.z;
+	                      break;
+
+	                  default:
+	                      // Diğer sensörler
+	                      break;
+	              }
+	          }
+	      }
+
+	      // Her 100ms'de bir tüm verileri yazdır
+	          if (HAL_GetTick() - lastPrintTime > 500) {
+	              lastPrintTime = HAL_GetTick();
+
+	              printf("\r\n=== BNO085 Sensor Data ===\r\n");
+	              printf("Roll: %.1f  Pitch: %.1f  Yaw: %.1f\r\n", roll, pitch, yaw);
+	              printf("Accel: X:%.2f Y:%.2f Z:%.2f m/s2\r\n", accel_x, accel_y, accel_z);
+	              printf("Gyro:  X:%.2f Y:%.2f Z:%.2f rad/s\r\n", gyro_x, gyro_y, gyro_z);
+	              printf("Mag:   X:%.1f Y:%.1f Z:%.1f uT\r\n", mag_x, mag_y, mag_z);
+	              printf("==========================\r\n");
+	          }
+
+	      HAL_Delay(10); // Küçük gecikme
   }
   /* USER CODE END 3 */
 }
@@ -156,140 +384,14 @@ void SystemClock_Config(void)
   }
 }
 
-/**
-  * @brief I2C1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_I2C1_Init(void)
-{
-
-  /* USER CODE BEGIN I2C1_Init 0 */
-
-  /* USER CODE END I2C1_Init 0 */
-
-  /* USER CODE BEGIN I2C1_Init 1 */
-
-  /* USER CODE END I2C1_Init 1 */
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.ClockSpeed = 100000;
-  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
-  hi2c1.Init.OwnAddress1 = 0;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN I2C1_Init 2 */
-
-  /* USER CODE END I2C1_Init 2 */
-
-}
-
-/**
-  * @brief USART1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART1_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART1_Init 0 */
-
-  /* USER CODE END USART1_Init 0 */
-
-  /* USER CODE BEGIN USART1_Init 1 */
-
-  /* USER CODE END USART1_Init 1 */
-  huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
-  huart1.Init.WordLength = UART_WORDLENGTH_8B;
-  huart1.Init.StopBits = UART_STOPBITS_1;
-  huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
-  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART1_Init 2 */
-
-  /* USER CODE END USART1_Init 2 */
-
-}
-
-/**
-  * @brief USART2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USART2_UART_Init(void)
-{
-
-  /* USER CODE BEGIN USART2_Init 0 */
-
-  /* USER CODE END USART2_Init 0 */
-
-  /* USER CODE BEGIN USART2_Init 1 */
-
-  /* USER CODE END USART2_Init 1 */
-  huart2.Instance = USART2;
-  huart2.Init.BaudRate = 38400;
-  huart2.Init.WordLength = UART_WORDLENGTH_8B;
-  huart2.Init.StopBits = UART_STOPBITS_1;
-  huart2.Init.Parity = UART_PARITY_NONE;
-  huart2.Init.Mode = UART_MODE_TX_RX;
-  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
-  if (HAL_UART_Init(&huart2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USART2_Init 2 */
-
-  /* USER CODE END USART2_Init 2 */
-
-}
-
-/**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_GPIO_Init(void)
-{
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-
-  /* USER CODE END MX_GPIO_Init_1 */
-
-  /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOD_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : PC13 */
-  GPIO_InitStruct.Pin = GPIO_PIN_13;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-
-  /* USER CODE END MX_GPIO_Init_2 */
-}
-
 /* USER CODE BEGIN 4 */
+
+// printf fonksiyonunu UART'a yönlendir
+int _write(int file, char *ptr, int len)
+{
+  HAL_UART_Transmit(&huart1, (uint8_t*)ptr, len, HAL_MAX_DELAY);
+  return len;
+}
 
 /* USER CODE END 4 */
 
@@ -300,7 +402,6 @@ static void MX_GPIO_Init(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
