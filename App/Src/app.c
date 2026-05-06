@@ -12,6 +12,7 @@
 #include "stm32f1xx_hal.h"
 #include <stdio.h>
 #include <math.h>   // for powf
+#include "BNO085_app.h"
 
 /* Handles */
 extern I2C_HandleTypeDef  hi2c1;
@@ -46,6 +47,7 @@ static struct bme68x_heatr_conf heat_off;
 void main_avionic_init(void)
 {
   led_on();
+  BNO085_init();
   printf("\r\nBME680 (bme68x) app init\r\n");
 
   /* --- Probe 0x76 / 0x77 --- */
@@ -75,6 +77,8 @@ void main_avionic_init(void)
 
 void main_avionic_loop(void)
 {
+    BNO085_service();
+    
     static uint32_t lastPrint = 0;
     struct bme68x_data d;
 
