@@ -56,6 +56,11 @@ void main_avionic_init(void)
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   led_on();
+
+  // GIVE YOURSELF 3 SECONDS TO CONNECT THE SERIAL MONITOR!
+  printf("\r\n\r\n--- Booting Avionics in 3 seconds ---\r\n");
+  HAL_Delay(3000); 
+
   BNO085_init();
   printf("\r\nBME680 (bme68x) app init\r\n");
 
@@ -64,7 +69,6 @@ void main_avionic_init(void)
   uint8_t id=0;
   HAL_I2C_Mem_Read(&hi2c1, addr7<<1, 0xD0, I2C_MEMADD_SIZE_8BIT, &id, 1, 100);
   printf("Probe chip ID at 0x%02X: 0x%02X (expect 0x61)\r\n", addr7, id);
-
 
   /* --- Init Bosch driver --- */
   if (bme68x_hal_init(&dev, &hi2c1, addr7) != BME68X_OK) {
@@ -86,19 +90,21 @@ void main_avionic_init(void)
 
 void main_avionic_loop(void)
 {
+    // Check the IMU continuously at max speed!
     BNO085_service();
     
-    static uint32_t lastPrint = 0;
+    static uint32_t lastBmeRead = 0;
     struct bme68x_data d;
 
-    if (bme68x_hal_forced_once(&dev, &bme_conf, &heat_off, &d) == 0) {
-        if ((HAL_GetTick() - lastPrint) > 200) { // ~5 Hz print
+    // ONLY block the CPU to read the BME680 every 200ms
+    if ((HAL_GetTick() - lastBmeRead) > 200) { 
+        if (bme68x_hal_forced_once(&dev, &bme_conf, &heat_off, &d) == 0) {
             float p_hpa = d.pressure / 100.0f;
             current_alt_m = altitude_from_hpa(p_hpa);
             printf("BME680: T=%.2f C, P=%.2f hPa, H=%.2f %%RH, Alt=%.1f m\r\n",
                    d.temperature, p_hpa, d.humidity, current_alt_m);
-            lastPrint = HAL_GetTick();
             led_toggle();
         }
+        lastBmeRead = HAL_GetTick(); // Reset the timer
     }
 }

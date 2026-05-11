@@ -20,14 +20,27 @@
 #include "main.h"
 
 /* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
 #include "app.h"
 #include "flight_logic.h"
 #include "gps.h"
 #include "lora_e22.h"
+#include "Quaternion.h"
+#include <stdio.h>  // <--- ADDED: Required for printf!
+/* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+// Struct to pack and send telemetry to the ground station
+typedef struct __attribute__((packed)) {
+    uint8_t  header;       // 0xAA
+    float    altitude;
+    float    velocity_z;
+    float    pitch;
+    float    latitude;
+    float    longitude;
+    uint8_t  flight_state; // Bitmask of current state
+} GroundTelemetry_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -75,7 +88,6 @@ static void MX_DMA_Init(void);
   */
 int main(void)
 {
-
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -103,12 +115,14 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   MX_USART3_UART_Init();
+  
   /* USER CODE BEGIN 2 */
   E22_Init();
   GPS_Init();
   main_avionic_init();
-  FlightLogic_Init();
+  
   uint32_t last_telemetry_time = HAL_GetTick();
+  /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -121,27 +135,52 @@ int main(void)
       GPS_Process();
       
       uint32_t current_time = HAL_GetTick();
-      if (current_time - last_telemetry_time >= 100) { // 10Hz
+      
+      // FIXED: Single 10Hz Timer Loop for everything
+      if (current_time - last_telemetry_time >= 100) { 
           last_telemetry_time = current_time;
           
           float raw_alt = current_alt_m;
           float raw_vz = 0.0f; // Derived later
           float raw_pitch = BNO080_Pitch; 
           
-          FlightLogic_Update(raw_alt, raw_vz, raw_pitch);
-          
+          // 3. KALMAN FILTER
+          // Feed raw data into your Kalman equations here to get clean data
+          float filtered_alt   = raw_alt;   // Placeholder
+          float filtered_vz    = raw_vz;    // Placeholder
+          float filtered_pitch = raw_pitch; // Placeholder
+
+          // 4. Evaluate Flight Logic (Triggers MOSFETs if conditions are met)
+          Process_Flight_Logic(filtered_alt, filtered_vz, filtered_pitch);
+
+          // 5. Pack and Print Telemetry
           GroundTelemetry_t telemetry;
           telemetry.header = 0xAA;
-          telemetry.timestamp_ms = current_time;
-          telemetry.kalman_altitude = current_state.kalman_alt;
-          telemetry.kalman_velocity = current_state.kalman_vz;
-          telemetry.pitch = current_state.pitch;
-          telemetry.state = current_state.state;
-          telemetry.gps_lat = current_gps_data.latitude;
-          telemetry.gps_lon = current_gps_data.longitude;
-          telemetry.checksum = 0; 
+          telemetry.altitude = filtered_alt;
+          telemetry.velocity_z = filtered_vz;
+          telemetry.pitch = filtered_pitch;
           
-          E22_SendPayload_DMA((uint8_t*)&telemetry, sizeof(GroundTelemetry_t));
+          if (current_gps_data.fix_quality > 0) {
+              telemetry.latitude = current_gps_data.latitude;
+              telemetry.longitude = current_gps_data.longitude;
+          } else {
+              telemetry.latitude = 0.0f;
+              telemetry.longitude = 0.0f;
+          }
+
+          telemetry.flight_state = 
+              (current_flight_state.liftoff_detected << 0) |
+              (current_flight_state.apogee_detected  << 1) |
+              (current_flight_state.drogue_deployed  << 2) |
+              (current_flight_state.main_deployed    << 3);
+          
+          // ---> UNIFIED TELEMETRY PRINT <---
+          printf("[TELEMETRY] Alt: %5.1fm | Pitch: %5.1f, Roll: %5.1f, Yaw: %5.1f | GPS: Lat %.6f, Lon %.6f (Sats: %d)\r\n", 
+                 telemetry.altitude, 
+                 BNO080_Pitch, BNO080_Roll, BNO080_Yaw, 
+                 telemetry.latitude, telemetry.longitude, current_gps_data.satellites);
+
+          // E22_SendPayload_DMA((uint8_t*)&telemetry, sizeof(GroundTelemetry_t)); // Uncomment if E22 is setup
       }
   }
   /* USER CODE END 3 */
@@ -190,14 +229,6 @@ void SystemClock_Config(void)
   */
 static void MX_I2C1_Init(void)
 {
-
-  /* USER CODE BEGIN I2C1_Init 0 */
-
-  /* USER CODE END I2C1_Init 0 */
-
-  /* USER CODE BEGIN I2C1_Init 1 */
-
-  /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
   hi2c1.Init.ClockSpeed = 100000;
   hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
@@ -211,10 +242,6 @@ static void MX_I2C1_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN I2C1_Init 2 */
-
-  /* USER CODE END I2C1_Init 2 */
-
 }
 
 /**
@@ -224,14 +251,6 @@ static void MX_I2C1_Init(void)
   */
 static void MX_USART1_UART_Init(void)
 {
-
-  /* USER CODE BEGIN USART1_Init 0 */
-
-  /* USER CODE END USART1_Init 0 */
-
-  /* USER CODE BEGIN USART1_Init 1 */
-
-  /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
   huart1.Init.BaudRate = 115200;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
@@ -244,10 +263,6 @@ static void MX_USART1_UART_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART1_Init 2 */
-
-  /* USER CODE END USART1_Init 2 */
-
 }
 
 /**
@@ -257,14 +272,6 @@ static void MX_USART1_UART_Init(void)
   */
 static void MX_USART2_UART_Init(void)
 {
-
-  /* USER CODE BEGIN USART2_Init 0 */
-
-  /* USER CODE END USART2_Init 0 */
-
-  /* USER CODE BEGIN USART2_Init 1 */
-
-  /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
   huart2.Init.BaudRate = 38400;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
@@ -277,10 +284,6 @@ static void MX_USART2_UART_Init(void)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN USART2_Init 2 */
-
-  /* USER CODE END USART2_Init 2 */
-
 }
 
 static void MX_USART3_UART_Init(void)
@@ -318,9 +321,6 @@ static void MX_DMA_Init(void)
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-
-  /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
@@ -343,15 +343,7 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-
-  /* USER CODE END MX_GPIO_Init_2 */
 }
-
-/* USER CODE BEGIN 4 */
-
-/* USER CODE END 4 */
 
 /**
   * @brief  This function is executed in case of error occurrence.
@@ -359,27 +351,13 @@ static void MX_GPIO_Init(void)
   */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
-  /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

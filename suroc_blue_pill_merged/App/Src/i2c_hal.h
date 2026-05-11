@@ -3,7 +3,7 @@
 
 #include "sh2_hal.h"
 #include "sh2_err.h"
-#include "i2c.h"
+#include "main.h"
 
 #include <stdint.h>
 #include <stdbool.h>
